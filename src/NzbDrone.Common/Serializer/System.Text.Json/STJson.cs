@@ -11,7 +11,7 @@ namespace NzbDrone.Common.Serializer
         private static readonly JsonSerializerOptions SerializerSettings = GetSerializerSettings();
         private static readonly JsonWriterOptions WriterOptions = new JsonWriterOptions
         {
-            Indented = true
+            Indented = false
         };
 
         public static JsonSerializerOptions GetSerializerSettings()
@@ -28,7 +28,7 @@ namespace NzbDrone.Common.Serializer
             serializerSettings.PropertyNameCaseInsensitive = true;
             serializerSettings.DictionaryKeyPolicy = JsonNamingPolicy.CamelCase;
             serializerSettings.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
-            serializerSettings.WriteIndented = true;
+            serializerSettings.WriteIndented = false;
 
             serializerSettings.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, true));
             serializerSettings.Converters.Add(new STJVersionConverter());

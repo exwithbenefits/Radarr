@@ -7,6 +7,7 @@ using FluentValidation;
 using Microsoft.AspNetCore.Mvc;
 using NzbDrone.Common.Extensions;
 using NzbDrone.Core.Configuration;
+using NzbDrone.Core.Datastore;
 using NzbDrone.Core.Datastore.Events;
 using NzbDrone.Core.DecisionEngine.Specifications;
 using NzbDrone.Core.Languages;
@@ -24,6 +25,7 @@ using NzbDrone.Core.Validation;
 using NzbDrone.Core.Validation.Paths;
 using NzbDrone.SignalR;
 using Radarr.Http;
+using Radarr.Http.Extensions;
 using Radarr.Http.REST;
 using Radarr.Http.REST.Attributes;
 
@@ -169,6 +171,77 @@ namespace Radarr.Api.V3.Movies
             }
 
             return moviesResources;
+        }
+
+        [HttpGet("paged")]
+        [Produces("application/json")]
+        public PagingResource<MovieResource> GetMoviesPaged([FromQuery] PagingRequestResource paging, bool excludeLocalCovers = false, int? languageId = null, bool? monitored = null)
+        {
+            var translationLanguage = languageId is > 0
+                ? Language.All.Single(l => l.Id == languageId.Value)
+                : (Language)_configService.MovieInfoLanguage;
+
+            var availDelay = _configService.AvailabilityDelay;
+
+            var pagingResource = new PagingResource<MovieResource>(paging);
+            var pagingSpec = pagingResource.MapToPagingSpec<MovieResource, Movie>(
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    "movieMetadata.sortTitle",
+                    "movieMetadata.year",
+                    "movies.lastSearchTime",
+                    "movieMetadata.inCinemas",
+                    "movieMetadata.digitalRelease",
+                    "movieMetadata.physicalRelease",
+                    "movies.added",
+                    "movies.id"
+                },
+                "movieMetadata.sortTitle",
+                SortDirection.Ascending);
+
+            if (monitored.HasValue)
+            {
+                pagingSpec.FilterExpressions.Add(v => v.Monitored == monitored.Value);
+            }
+
+            var translations = _movieTranslationService
+                .GetAllTranslationsForLanguage(translationLanguage);
+            var tdict = translations.ToDictionaryIgnoreDuplicates(x => x.MovieMetadataId);
+
+            var movieStats = _movieStatisticsService.MovieStatistics();
+            var sdict = movieStats.ToDictionary(x => x.MovieId);
+
+            var rootFolders = _rootFolderService.All();
+
+            Dictionary<string, FileInfo> coverFileInfos = null;
+            if (!excludeLocalCovers)
+            {
+                coverFileInfos = _coverMapper.GetCoverFileInfos();
+            }
+
+            var resource = pagingSpec.ApplyToPage(
+                spec => _moviesService.Paged(spec),
+                movie =>
+                {
+                    var translation = GetTranslationFromDict(tdict, movie.MovieMetadata, translationLanguage);
+                    var movieResource = movie.ToResource(availDelay, translation, _qualityUpgradableSpecification);
+
+                    if (coverFileInfos != null)
+                    {
+                        _coverMapper.ConvertToLocalUrls(movieResource.Id, movieResource.Images);
+                    }
+
+                    if (sdict.TryGetValue(movieResource.Id, out var stats))
+                    {
+                        LinkMovieStatistics(movieResource, stats);
+                    }
+
+                    movieResource.RootFolderPath = _rootFolderService.GetBestRootFolderPath(movieResource.Path, rootFolders);
+
+                    return movieResource;
+                });
+
+            return resource;
         }
 
         protected override MovieResource GetResourceById(int id)

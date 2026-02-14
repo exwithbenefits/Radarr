@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json.Serialization;
-using NzbDrone.Common.Extensions;
 using NzbDrone.Core.CustomFormats;
 using NzbDrone.Core.DecisionEngine.Specifications;
 using NzbDrone.Core.Languages;
@@ -129,7 +128,12 @@ namespace Radarr.Api.V3.Movies
                 Status = model.MovieMetadata.Value.Status,
                 Overview = translatedOverview,
 
-                Images = model.MovieMetadata.Value.Images.JsonClone(),
+                Images = model.MovieMetadata.Value.Images.Select(i => new MediaCover
+                {
+                    CoverType = i.CoverType,
+                    Url = i.Url,
+                    RemoteUrl = i.RemoteUrl
+                }).ToList(),
 
                 Year = model.Year,
                 SecondaryYear = model.MovieMetadata.Value.SecondaryYear,
