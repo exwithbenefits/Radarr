@@ -2,10 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 using FluentValidation;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 using NzbDrone.Common.Extensions;
+using NzbDrone.Common.Serializer;
 using NzbDrone.Core.Configuration;
 using NzbDrone.Core.Datastore;
 using NzbDrone.Core.Datastore.Events;
@@ -116,61 +119,102 @@ namespace Radarr.Api.V3.Movies
         }
 
         [HttpGet]
-        public List<MovieResource> AllMovie(int? tmdbId, bool excludeLocalCovers = false, int? languageId = null)
+        public async Task<IActionResult> AllMovie(int? tmdbId, bool excludeLocalCovers = false, int? languageId = null)
         {
-            var moviesResources = new List<MovieResource>();
-
             var translationLanguage = languageId is > 0
                 ? Language.All.Single(l => l.Id == languageId.Value)
                 : (Language)_configService.MovieInfoLanguage;
 
             if (tmdbId.HasValue)
             {
+                var moviesResources = new List<MovieResource>();
                 var movie = _moviesService.FindByTmdbId(tmdbId.Value);
 
                 if (movie != null)
                 {
                     moviesResources.AddIfNotNull(MapToResource(movie, translationLanguage));
                 }
+
+                return new JsonResult(moviesResources, STJson.GetSerializerSettings());
             }
-            else
+
+            // Stream the JSON response using paginated DB queries to avoid
+            // Dapper deserializing 185k+ rows at once (which takes 10+ minutes).
+            var syncIOFeature = HttpContext.Features.Get<IHttpBodyControlFeature>();
+            if (syncIOFeature != null)
             {
-                var movieStats = _movieStatisticsService.MovieStatistics();
-                var availDelay = _configService.AvailabilityDelay;
+                syncIOFeature.AllowSynchronousIO = true;
+            }
 
-                var movieTask = Task.Run(() => _moviesService.GetAllMovies());
+            Response.ContentType = "application/json";
+            Response.StatusCode = 200;
 
-                var translations = _movieTranslationService
-                    .GetAllTranslationsForLanguage(translationLanguage);
+            var availDelay = _configService.AvailabilityDelay;
+            var rootFolders = _rootFolderService.All();
+            var jsonOptions = STJson.GetSerializerSettings();
 
-                var tdict = translations.ToDictionaryIgnoreDuplicates(x => x.MovieMetadataId);
-                var sdict = movieStats.ToDictionary(x => x.MovieId);
+            await using var writer = new Utf8JsonWriter(Response.Body, new JsonWriterOptions { Indented = false });
+            writer.WriteStartArray();
 
-                var movies = movieTask.GetAwaiter().GetResult();
+            // Fetch movies in pages of 1000, loading translations and stats per batch
+            const int batchSize = 1000;
+            var page = 1;
+            bool hasMore = true;
 
-                moviesResources = new List<MovieResource>(movies.Count);
+            while (hasMore)
+            {
+                var pagingSpec = new PagingSpec<Movie>
+                {
+                    Page = page,
+                    PageSize = batchSize,
+                    SortKey = "movies.id",
+                    SortDirection = SortDirection.Ascending
+                };
 
-                foreach (var movie in movies)
+                pagingSpec = _moviesService.Paged(pagingSpec);
+
+                var movieIds = pagingSpec.Records.Select(m => m.Id).ToList();
+                var metadataIds = pagingSpec.Records.Select(m => m.MovieMetadataId).ToList();
+
+                var batchTranslations = _movieTranslationService
+                    .GetTranslationsForMovieMetadataIds(metadataIds, translationLanguage);
+                var tdict = batchTranslations.ToDictionaryIgnoreDuplicates(x => x.MovieMetadataId);
+
+                var batchStats = _movieStatisticsService.MovieStatistics(movieIds);
+                var sdict = batchStats.ToDictionary(x => x.MovieId);
+
+                foreach (var movie in pagingSpec.Records)
                 {
                     var translation = GetTranslationFromDict(tdict, movie.MovieMetadata, translationLanguage);
-                    moviesResources.Add(movie.ToResource(availDelay, translation, _qualityUpgradableSpecification));
+                    var movieResource = movie.ToResource(availDelay, translation, _qualityUpgradableSpecification);
+
+                    if (!excludeLocalCovers)
+                    {
+                        _coverMapper.ConvertToLocalUrls(movieResource.Id, movieResource.Images);
+                    }
+
+                    if (sdict.TryGetValue(movieResource.Id, out var stats))
+                    {
+                        LinkMovieStatistics(movieResource, stats);
+                    }
+
+                    movieResource.RootFolderPath = _rootFolderService.GetBestRootFolderPath(movieResource.Path, rootFolders);
+
+                    JsonSerializer.Serialize(writer, movieResource, jsonOptions);
                 }
 
-                if (!excludeLocalCovers)
-                {
-                    var coverFileInfos = _coverMapper.GetCoverFileInfos();
+                // Flush after each batch to stream data to client
+                await writer.FlushAsync();
+                await Response.Body.FlushAsync();
 
-                    MapCoversToLocal(moviesResources, coverFileInfos);
-                }
-
-                LinkMovieStatistics(moviesResources, sdict);
-
-                var rootFolders = _rootFolderService.All();
-
-                moviesResources.ForEach(m => m.RootFolderPath = _rootFolderService.GetBestRootFolderPath(m.Path, rootFolders));
+                hasMore = pagingSpec.Records.Count == batchSize;
+                page++;
             }
 
-            return moviesResources;
+            writer.WriteEndArray();
+            await writer.FlushAsync();
+
+            return new EmptyResult();
         }
 
         [HttpGet("paged")]
