@@ -204,44 +204,53 @@ namespace Radarr.Api.V3.Movies
                 pagingSpec.FilterExpressions.Add(v => v.Monitored == monitored.Value);
             }
 
+            // Execute paginated DB query first
+            pagingSpec = _moviesService.Paged(pagingSpec);
+
+            // Now load translations and stats only for the paged results
+            var movieIds = pagingSpec.Records.Select(m => m.Id).ToList();
+            var metadataIds = pagingSpec.Records.Select(m => m.MovieMetadataId).ToList();
+
             var translations = _movieTranslationService
-                .GetAllTranslationsForLanguage(translationLanguage);
+                .GetTranslationsForMovieMetadataIds(metadataIds, translationLanguage);
             var tdict = translations.ToDictionaryIgnoreDuplicates(x => x.MovieMetadataId);
 
-            var movieStats = _movieStatisticsService.MovieStatistics();
+            var movieStats = _movieStatisticsService.MovieStatistics(movieIds);
             var sdict = movieStats.ToDictionary(x => x.MovieId);
 
             var rootFolders = _rootFolderService.All();
 
-            Dictionary<string, FileInfo> coverFileInfos = null;
-            if (!excludeLocalCovers)
+            var records = new List<MovieResource>(pagingSpec.Records.Count);
+
+            foreach (var movie in pagingSpec.Records)
             {
-                coverFileInfos = _coverMapper.GetCoverFileInfos();
+                var translation = GetTranslationFromDict(tdict, movie.MovieMetadata, translationLanguage);
+                var movieResource = movie.ToResource(availDelay, translation, _qualityUpgradableSpecification);
+
+                if (!excludeLocalCovers)
+                {
+                    _coverMapper.ConvertToLocalUrls(movieResource.Id, movieResource.Images);
+                }
+
+                if (sdict.TryGetValue(movieResource.Id, out var stats))
+                {
+                    LinkMovieStatistics(movieResource, stats);
+                }
+
+                movieResource.RootFolderPath = _rootFolderService.GetBestRootFolderPath(movieResource.Path, rootFolders);
+
+                records.Add(movieResource);
             }
 
-            var resource = pagingSpec.ApplyToPage(
-                spec => _moviesService.Paged(spec),
-                movie =>
-                {
-                    var translation = GetTranslationFromDict(tdict, movie.MovieMetadata, translationLanguage);
-                    var movieResource = movie.ToResource(availDelay, translation, _qualityUpgradableSpecification);
-
-                    if (coverFileInfos != null)
-                    {
-                        _coverMapper.ConvertToLocalUrls(movieResource.Id, movieResource.Images);
-                    }
-
-                    if (sdict.TryGetValue(movieResource.Id, out var stats))
-                    {
-                        LinkMovieStatistics(movieResource, stats);
-                    }
-
-                    movieResource.RootFolderPath = _rootFolderService.GetBestRootFolderPath(movieResource.Path, rootFolders);
-
-                    return movieResource;
-                });
-
-            return resource;
+            return new PagingResource<MovieResource>
+            {
+                Page = pagingSpec.Page,
+                PageSize = pagingSpec.PageSize,
+                SortDirection = pagingSpec.SortDirection,
+                SortKey = pagingSpec.SortKey,
+                TotalRecords = pagingSpec.TotalRecords,
+                Records = records
+            };
         }
 
         protected override MovieResource GetResourceById(int id)

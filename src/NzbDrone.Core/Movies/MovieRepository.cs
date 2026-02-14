@@ -55,6 +55,9 @@ namespace NzbDrone.Core.Movies
                 return movie;
             });
 
+        protected override SqlBuilder PagedBuilder() => new SqlBuilder(_database.DatabaseType)
+            .Join<Movie, MovieMetadata>((m, p) => m.MovieMetadataId == p.Id);
+
         protected override SqlBuilder Builder() => new SqlBuilder(_database.DatabaseType)
             .Join<Movie, QualityProfile>((m, p) => m.QualityProfileId == p.Id)
             .Join<Movie, MovieMetadata>((m, p) => m.MovieMetadataId == p.Id)

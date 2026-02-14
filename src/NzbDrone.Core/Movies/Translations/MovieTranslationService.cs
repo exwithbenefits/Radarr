@@ -11,6 +11,7 @@ namespace NzbDrone.Core.Movies.Translations
     {
         List<MovieTranslation> GetAllTranslationsForMovieMetadata(int movieMetadataId);
         List<MovieTranslation> GetAllTranslationsForLanguage(Language language);
+        List<MovieTranslation> GetTranslationsForMovieMetadataIds(List<int> movieMetadataIds, Language language);
         List<MovieTranslation> UpdateTranslations(List<MovieTranslation> titles, MovieMetadata movie);
     }
 
@@ -34,6 +35,11 @@ namespace NzbDrone.Core.Movies.Translations
         public List<MovieTranslation> GetAllTranslationsForLanguage(Language language)
         {
             return _translationRepo.FindByLanguage(language).ToList();
+        }
+
+        public List<MovieTranslation> GetTranslationsForMovieMetadataIds(List<int> movieMetadataIds, Language language)
+        {
+            return _translationRepo.FindByMovieMetadataIds(movieMetadataIds, language);
         }
 
         public void RemoveTitle(MovieTranslation title)
