@@ -1,0 +1,73 @@
+name: Build Custom Radarr Image
+
+on:
+  push:
+    branches:
+      - perf/large-library-optimizations
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/radarr-custom
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish Radarr (linux-musl-x64)
+        run: |
+          dotnet publish src/NzbDrone.Console/Radarr.Console.csproj \
+            -c Release -f net8.0 -r linux-musl-x64 --self-contained true \
+            -o _publish \
+            /p:AnalysisLevel=none /p:EnforceCodeStyleInBuild=false /p:RunAnalyzers=false
+
+      - name: Publish Radarr.Mono
+        run: |
+          dotnet publish src/NzbDrone.Mono/Radarr.Mono.csproj \
+            -c Release -f net8.0 -r linux-musl-x64 --self-contained false \
+            -o _publish_mono \
+            /p:AnalysisLevel=none /p:EnforceCodeStyleInBuild=false /p:RunAnalyzers=false
+
+      - name: Copy Mono dependencies
+        run: |
+          cp _publish_mono/Radarr.Mono.dll _publish/
+          cp _publish_mono/Radarr.Mono.pdb _publish/ 2>/dev/null || true
+          cp _publish_mono/Mono.Posix.NETStandard.dll _publish/
+          cp _publish_mono/libMonoPosixHelper.so _publish/
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=
+            type=ref,event=branch
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
